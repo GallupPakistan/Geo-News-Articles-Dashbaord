@@ -60,6 +60,7 @@ def inject_branding(page_title: str):
         'background-position: top center; background-attachment: fixed;'
         '}'
         '[data-testid="stHeader"] { background: rgba(0,0,0,0); }'
+        '[data-testid="stToolbar"] { visibility: hidden; }'
         'section[data-testid="stSidebar"] { background-color: #0b1f4d; }'
         'section[data-testid="stSidebar"] * { color: #f5f7fa !important; }'
         'div[data-testid="stMetric"] { background: rgba(255,255,255,0.85); border-radius: 10px; '

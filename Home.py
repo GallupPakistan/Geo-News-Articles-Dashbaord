@@ -1,204 +1,331 @@
-import numpy as np
+"""Geo News — Opinions Analytics
+A single-page, 4-tab dashboard (Overview / Classification Trends /
+Content & Categories / Authors & Sources), restructured around
+auto-classified article categories rather than raw publishing volume.
+"""
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
 from common import (
-    avg_summary_words, busiest_day, coauthor_split, contributor_mix,
-    inject_branding, kpi_card, kpi_grid, longest_streak,
-    most_active_weekday, rolling_weekly_avg, sidebar_data_uploader,
-    sidebar_filters, summary_word_counts, title_word_counts,
-    week_over_week_counts, weekday_distribution,
+    author_contribution_table, category_author_diversity, category_distribution,
+    category_month_trend, category_themes, classify_articles, explode_authors,
+    kpi_grid, load_data, source_distribution,
 )
 
-inject_branding("Home")
+# ── Page config + theme ─────────────────────────────────────────────────
+st.set_page_config(page_title="Geo News — Opinions Analytics", page_icon="📰", layout="wide")
 
-df = sidebar_data_uploader()
-fdf = sidebar_filters(df)
+INK = "#1c2333"
+ACCENT = "#0d9488"       # teal — primary accent
+ACCENT_2 = "#f59e0b"     # amber — secondary accent
+PALETTE = ["#0d9488", "#f59e0b", "#6366f1", "#ef4444", "#0ea5e9", "#a855f7", "#84cc16", "#ec4899"]
 
-col_logo, col_title = st.columns((1, 6))
+st.markdown(f"""
+<style>
+#MainMenu, footer {{visibility: hidden;}}
+[data-testid="stHeader"] {{ background: rgba(0,0,0,0); }}
+[data-testid="stMain"] {{ background: #f4f6f8; }}
+.block-container {{ padding-top: 1.2rem; max-width: 1300px; }}
+
+section[data-testid="stSidebar"] {{ background-color: {INK}; }}
+section[data-testid="stSidebar"] * {{ color: #e7eaf3 !important; }}
+section[data-testid="stSidebar"] .stCheckbox label p {{ font-size: 0.85rem; }}
+
+/* Top tab bar styled as pills, like the reference dashboard's nav */
+[data-testid="stTabs"] {{
+    background: #ffffff; padding: 6px; border-radius: 12px;
+    border: 1px solid #e5e8ee; margin-bottom: 6px;
+}}
+[data-testid="stTabs"] [role="tablist"] {{ gap: 6px; }}
+[data-testid="stTab"] {{
+    height: 42px; border-radius: 8px; padding: 0 18px; font-weight: 600;
+    color: {INK}; background: transparent;
+}}
+[data-testid="stTab"][aria-selected="true"] {{
+    background: {ACCENT} !important;
+}}
+[data-testid="stTab"][aria-selected="true"] p {{ color: white !important; }}
+div[data-testid="stMetric"] {{
+    background: white; border-radius: 12px; padding: 12px 16px;
+    border: 1px solid #e5e8ee; box-shadow: 0 1px 2px rgba(20,20,40,0.04);
+}}
+h1, h2, h3 {{ color: {INK}; }}
+.card {{ background: white; border-radius: 12px; padding: 16px 18px; border: 1px solid #e5e8ee;
+         box-shadow: 0 1px 2px rgba(20,20,40,0.04); margin-bottom: 4px; }}
+.card h4 {{ margin-top: 0; margin-bottom: 10px; font-size: 0.95rem; color: {INK}; }}
+
+/* Top filter bar — light gray tray holding individual white dropdown cards,
+   matching the Gallup-style reference layout. Targets containers created
+   with st.container(border=True, key="...filters") in Home.py. */
+div[class*="st-key-"][class*="_filters"] {{
+    background: #eef0f4 !important; border-radius: 10px !important;
+    border: none !important; padding: 14px 10px 4px 10px !important; margin-bottom: 14px !important;
+}}
+div[data-testid="stSelectbox"], div[data-testid="stMultiSelect"], div[data-testid="stTextInput"] {{
+    background: white; border-radius: 8px; border: 1px solid #e0e3ea;
+    padding: 8px 12px 4px 12px;
+}}
+div[data-testid="stSelectbox"] label p, div[data-testid="stMultiSelect"] label p,
+div[data-testid="stTextInput"] label p {{
+    font-weight: 600; font-size: 0.78rem; color: #5b6472; text-transform: uppercase;
+    letter-spacing: 0.03em;
+}}
+</style>
+""", unsafe_allow_html=True)
+
+
+def clean_chart(fig, h=None, legend_bottom=False):
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)", font=dict(color=INK),
+    )
+    if h:
+        fig.update_layout(height=h)
+    if legend_bottom:
+        fig.update_layout(legend=dict(orientation="h", y=-0.2))
+    return fig
+
+
+# ── Data + classification ──────────────────────────────────────────────
+if "df" not in st.session_state:
+    st.session_state["df"] = load_data(None)
+df = classify_articles(st.session_state["df"])
+
+all_categories = sorted(df["Category"].unique())
+authors = sorted(explode_authors(df)["Author"].unique())
+
+# ── Sidebar: branding + Classification checklist (Gallup-style) ──────────
+# Mirrors the reference Power BI dashboard's left-hand "Classification"
+# checklist — unlike a multiselect, every category gets its own checkbox,
+# and the choice applies globally across all 4 tabs below.
+with st.sidebar:
+    st.image("assets/geo_logo.png", width=90)
+    st.markdown("### Geo News — Opinions")
+    st.caption("OP-ED articles analytics")
+    st.divider()
+    st.markdown("#### Classification")
+    st.caption("Uncheck a category to hide it across every tab.")
+    selected_categories = []
+    for cat in all_categories:
+        if st.checkbox(cat, value=True, key=f"sb_cat_{cat}"):
+            selected_categories.append(cat)
+    if not selected_categories:
+        st.warning("Select at least one category to see data.", icon="⚠️")
+        selected_categories = all_categories
+
+df = df[df["Category"].isin(selected_categories)].copy()
+
+col_logo, col_title = st.columns((1, 8))
 with col_logo:
-    st.image("assets/geo_logo.png", width=80)
+    st.image("assets/geo_logo.png", width=64)
 with col_title:
-    st.title("📰 Opinions — Editorial Dashboard")
-    st.caption("Overview of Geo News opinion articles: volume, authors, and reach over time")
+    st.title("Opinions — Editorial Analytics")
+    st.caption("Classification, categories, language and author breakdown of Geo News opinion articles")
 
-st.divider()
-
-if fdf.empty:
-    st.info("No articles in the current filter.")
-    st.stop()
-
-# ── Headline KPIs: article volume, with week-over-week delta + sparkline ──
-weekly_counts = fdf.groupby("Week").size()
-this_week, last_week = week_over_week_counts(fdf)
-span_days = (fdf["Publish Date"].max() - fdf["Publish Date"].min()).days if len(fdf) else 0
-
-k1, k2, k3, k4 = st.columns(4)
-kpi_card(k1, "📄 Articles", len(fdf),
-         delta=f"{this_week - last_week:+d} this wk" if len(fdf) else None,
-         spark=weekly_counts, key="spark_articles")
-kpi_card(k2, "✍️ Authors", fdf["Author"].nunique(),
-         spark=fdf.groupby("Week")["Author"].nunique(), color="#f7941e", key="spark_authors")
-k3.metric("🗓️ Date span (days)", span_days)
-k4.metric(
-    "⚡ Articles / week (avg)",
-    round(len(fdf) / max(span_days / 7, 1), 1) if span_days else 0,
+tab_overview, tab_class, tab_content, tab_authors = st.tabs(
+    ["Overview", "Classification Trends", "Content & Categories", "Authors & Sources"]
 )
 
-st.divider()
+# ══════════════════════════════════════════════════════════════════════
+# TAB 1 — OVERVIEW
+# ══════════════════════════════════════════════════════════════════════
+with tab_overview:
+    fdf = df.copy()
 
-# ── New KPIs — rendered as wrapping HTML tiles so nothing gets clipped ────
-streak = longest_streak(fdf["Publish Date"])
-b_day, b_day_count = busiest_day(fdf)
-solo, co = coauthor_split(fdf)
-avg_words = avg_summary_words(fdf)
-top_weekday, top_weekday_count = most_active_weekday(fdf)
-one_off, repeat = contributor_mix(fdf)
+    if fdf.empty:
+        st.info("No articles match the current filters.")
+        st.stop()
 
-kpi_grid([
-    {"emoji": "🔥", "label": "Longest streak", "value": f"{streak} day{'s' if streak != 1 else ''}",
-     "sub": "Consecutive days with ≥1 article"},
-    {"emoji": "📆", "label": "Busiest day", "value": f"{b_day_count} article{'s' if b_day_count != 1 else ''}",
-     "sub": f"on {b_day:%d %b %Y}" if b_day else ""},
-    {"emoji": "🤝", "label": "Solo vs co-authored", "value": f"{solo} / {co}",
-     "sub": "Single-byline vs multi-byline"},
-    {"emoji": "📝", "label": "Avg. summary length", "value": f"{avg_words:.0f} words"},
-    {"emoji": "⭐", "label": "Most active weekday", "value": top_weekday or "—",
-     "sub": f"{top_weekday_count} articles" if top_weekday else ""},
-    {"emoji": "🔁", "label": "One-off vs repeat writers", "value": f"{one_off} / {repeat}",
-     "sub": "Wrote once vs. wrote 2+ times"},
-])
+    dist = category_distribution(fdf)
+    top_cat = dist.iloc[0]["Category"] if not dist.empty else "—"
+    span = f'{fdf["Publish Date"].min():%d %b %Y} – {fdf["Publish Date"].max():%d %b %Y}'
 
-st.divider()
-st.header("📊 Publishing volume")
+    kpi_grid([
+        {"emoji": "📰", "label": "Articles", "value": str(len(fdf))},
+        {"emoji": "🏷️", "label": "Categories covered", "value": str(dist["Category"].nunique())},
+        {"emoji": "✍️", "label": "Authors", "value": str(explode_authors(fdf)["Author"].nunique())},
+        {"emoji": "🏆", "label": "Top category", "value": top_cat},
+        {"emoji": "🗓️", "label": "Coverage window", "value": span},
+    ])
 
-c1, c2, c3 = st.columns((2, 1, 1))
+    st.write("")
+    st.markdown('<div class="card"><h4>Share of coverage by category</h4>', unsafe_allow_html=True)
+    fig = px.pie(dist, names="Category", values="Articles", hole=0.55,
+                 color_discrete_sequence=PALETTE)
+    fig.update_traces(textinfo="percent")
+    st.plotly_chart(clean_chart(fig, h=380, legend_bottom=True), use_container_width=True,
+                     config={"displayModeBar": False})
+    st.markdown('</div>', unsafe_allow_html=True)
 
-with c1:
-    st.subheader("📈 Publishing trend (weekly)")
-    weekly = fdf.groupby("Week").size().reset_index(name="Articles")
-    fig = px.area(weekly, x="Week", y="Articles", markers=True,
-                   color_discrete_sequence=["#f7941e"])
-    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="rgba(0,0,0,0)",
-                       paper_bgcolor="rgba(0,0,0,0)")
-    st.plotly_chart(fig, use_container_width=True)
+# ══════════════════════════════════════════════════════════════════════
+# TAB 2 — CLASSIFICATION TRENDS
+# (Category IS the classification here — so this tab ranks and compares
+# categories against each other, rather than repeating the same category
+# breakdown against a day/month axis.)
+# ══════════════════════════════════════════════════════════════════════
+with tab_class:
+    fdf = df.copy()
 
-with c2:
-    st.subheader("🏆 Top 10 authors")
-    top_authors = fdf["Author"].value_counts().head(10).reset_index()
-    top_authors.columns = ["Author", "Articles"]
-    fig = px.bar(top_authors.sort_values("Articles"), x="Articles", y="Author",
-                 orientation="h", color_discrete_sequence=["#0c2f6b"])
-    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="rgba(0,0,0,0)",
-                       paper_bgcolor="rgba(0,0,0,0)")
-    st.plotly_chart(fig, use_container_width=True)
+    if fdf.empty:
+        st.info("No articles match the current filters.")
+        st.stop()
 
-with c3:
-    st.subheader("🥯 Contributor mix")
-    mix_df = pd.DataFrame({"Type": ["One-off writers", "Repeat writers"], "Count": [one_off, repeat]})
-    fig = px.pie(mix_df, names="Type", values="Count", hole=0.55,
-                 color_discrete_sequence=["#f7941e", "#0c2f6b"])
-    fig.update_traces(textinfo="value+percent")
-    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), showlegend=True,
-                       legend=dict(orientation="h", y=-0.15))
-    st.plotly_chart(fig, use_container_width=True)
+    dist = category_distribution(fdf)
 
-st.subheader("🌊 4-week rolling average")
-roll = rolling_weekly_avg(fdf)
-fig = px.line(roll, x="Week", y="Rolling avg", markers=True, color_discrete_sequence=["#0c2f6b"])
-fig.add_bar(x=roll["Week"], y=roll["Articles"], marker_color="rgba(247,148,30,0.35)", name="Weekly")
-fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="rgba(0,0,0,0)",
-                   paper_bgcolor="rgba(0,0,0,0)", showlegend=False)
-st.plotly_chart(fig, use_container_width=True)
+    st.markdown('<div class="card"><h4>Top classification trend</h4>', unsafe_allow_html=True)
+    top_n = st.slider("Number of categories to trend", 3, min(10, fdf["Category"].nunique()),
+                       min(6, fdf["Category"].nunique()))
+    trend = category_month_trend(fdf, top_n=top_n)
 
-st.divider()
-st.header("🧭 Publishing rhythm")
+    if trend.empty or trend["Month"].nunique() < 2:
+        st.info("Not enough months of data in the current filter to draw a trend line yet — "
+                "widen the date range or clear some filters.")
+    else:
+        fig = px.line(trend, x="Month", y="Share (%)", color="Category", markers=True,
+                      text="Share (%)", color_discrete_sequence=PALETTE)
+        fig.update_traces(line=dict(width=2.5), marker=dict(size=7),
+                           texttemplate="%{text}%", textposition="top center",
+                           textfont=dict(size=10))
+        fig.update_layout(legend=dict(orientation="h", y=1.18, x=0, font=dict(size=11)),
+                           xaxis_title=None, yaxis_title="Share of month's articles (%)")
+        st.plotly_chart(clean_chart(fig, h=460), use_container_width=True, config={"displayModeBar": False})
+        st.caption("Share of that month's articles falling in each category. "
+                   "Use the Categories filter above to focus on specific ones.")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-st.subheader("🗓️ Day-of-week pattern")
-wd = weekday_distribution(fdf)
-fig = px.bar(wd, x="Weekday", y="Articles", color_discrete_sequence=["#f7941e"])
-fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="rgba(0,0,0,0)",
-                   paper_bgcolor="rgba(0,0,0,0)")
-st.plotly_chart(fig, use_container_width=True)
+    st.write("")
+    st.markdown('<div class="card"><h4>Classification ranking (share of all articles)</h4>',
+                unsafe_allow_html=True)
+    fig = px.bar(dist.sort_values("Share (%)"), x="Share (%)", y="Category", orientation="h",
+                 text="Share (%)", color_discrete_sequence=[ACCENT])
+    fig.update_traces(texttemplate="%{text}%", textposition="outside")
+    st.plotly_chart(clean_chart(fig, h=420), use_container_width=True, config={"displayModeBar": False})
+    st.markdown('</div>', unsafe_allow_html=True)
 
-st.divider()
-st.header("✏️ Editorial depth")
+    st.write("")
+    st.markdown('<div class="card"><h4>Unique authors per category</h4>', unsafe_allow_html=True)
+    st.caption("Is this classification driven by one voice, or many?")
+    div = category_author_diversity(fdf)
+    fig = px.bar(div.sort_values("Unique authors"), x="Unique authors", y="Category",
+                 orientation="h", color_discrete_sequence=[ACCENT_2])
+    st.plotly_chart(clean_chart(fig, h=380), use_container_width=True, config={"displayModeBar": False})
+    st.markdown('</div>', unsafe_allow_html=True)
 
-f1, f2 = st.columns(2)
+# ══════════════════════════════════════════════════════════════════════
+# TAB 3 — CONTENT & CATEGORIES
+# ══════════════════════════════════════════════════════════════════════
+with tab_content:
+    with st.container(border=True, key="content_filters"):
+        sf1, sf2 = st.columns((2, 2))
+        with sf1:
+            content_search = st.text_input("Search title / summary", key="content_search")
+        with sf2:
+            content_authors = st.multiselect("Author", authors, default=[], key="content_authors")
 
-with f1:
-    st.subheader("🔡 Title length distribution")
-    tw = title_word_counts(fdf)
-    fig = px.histogram(tw, nbins=12, color_discrete_sequence=["#f7941e"])
-    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="rgba(0,0,0,0)",
-                       paper_bgcolor="rgba(0,0,0,0)", xaxis_title="Words in title",
-                       yaxis_title="Articles", showlegend=False)
-    st.plotly_chart(fig, use_container_width=True)
+    fdf = df.copy()
+    if content_search:
+        term = content_search.lower()
+        fdf = fdf[
+            fdf["Title"].str.lower().str.contains(term, na=False)
+            | fdf["Summary (100 Words)"].str.lower().str.contains(term, na=False)
+        ]
+    if content_authors:
+        fdf = fdf[fdf["Author"].apply(lambda a: any(x in a for x in content_authors))]
 
-with f2:
-    st.subheader("📚 Summary length distribution")
-    sw = summary_word_counts(fdf)
-    fig = px.histogram(sw, nbins=12, color_discrete_sequence=["#0c2f6b"])
-    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="rgba(0,0,0,0)",
-                       paper_bgcolor="rgba(0,0,0,0)", xaxis_title="Words in summary",
-                       yaxis_title="Articles", showlegend=False)
-    st.plotly_chart(fig, use_container_width=True)
+    if fdf.empty:
+        st.info("No articles match the current filters.")
+        st.stop()
 
-st.divider()
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    cat_pick = st.selectbox("Themes covered in", sorted(fdf["Category"].unique()))
+    themes = category_themes(fdf, cat_pick)
+    if themes.empty:
+        st.info(f"Not enough repeated phrasing in **{cat_pick}** articles yet to surface distinct themes.")
+    else:
+        fig = px.bar(themes.sort_values("Share (%)"), x="Share (%)", y="Theme", orientation="h",
+                     text="Share (%)", color_discrete_sequence=[ACCENT])
+        fig.update_traces(texttemplate="%{text}%", textposition="outside")
+        st.plotly_chart(clean_chart(fig, h=340), use_container_width=True, config={"displayModeBar": False})
+    st.markdown('</div>', unsafe_allow_html=True)
 
-# ── Calendar heatmap — GitHub-style density grid ───────────────────────────
-st.subheader("🔲 Calendar heatmap")
-st.caption("Darker cells = more articles published that day")
+    st.write("")
+    st.markdown(f'<div class="card"><h4>Articles in {cat_pick}</h4>', unsafe_allow_html=True)
+    cat_articles = fdf[fdf["Category"] == cat_pick][["Publish Date", "Title", "Author"]]
+    st.dataframe(cat_articles.sort_values("Publish Date", ascending=False),
+                 use_container_width=True, hide_index=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
-cal = fdf.copy()
-cal["Date"] = cal["Publish Date"].dt.date
-daily = cal.groupby("Date").size()
+    with st.expander("View all articles (every category)"):
+        st.dataframe(
+            fdf[["Publish Date", "Title", "Author", "Category"]].sort_values("Publish Date", ascending=False),
+            use_container_width=True, hide_index=True,
+        )
 
-full_range = pd.date_range(fdf["Publish Date"].min().normalize(),
-                            fdf["Publish Date"].max().normalize(), freq="D")
-daily = daily.reindex([d.date() for d in full_range], fill_value=0)
-daily.index = pd.to_datetime(daily.index)
+    st.write("")
+    st.markdown('<div class="card"><h4>Word cloud</h4>', unsafe_allow_html=True)
+    try:
+        from wordcloud import WordCloud
+        import matplotlib.pyplot as plt
 
-weekday_order = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-week_num = daily.index.isocalendar().week + (daily.index.isocalendar().year - daily.index.isocalendar().year.min()) * 53
-weekday_lbl = daily.index.strftime("%a")
+        text = " ".join((fdf["Title"].fillna("") + " " + fdf["Summary (100 Words)"].fillna("")).tolist())
+        wc = WordCloud(width=1000, height=380, background_color="white",
+                       colormap="viridis", collocations=False).generate(text)
+        fig, ax = plt.subplots(figsize=(10, 3.8))
+        ax.imshow(wc, interpolation="bilinear")
+        ax.axis("off")
+        st.pyplot(fig, use_container_width=True)
+    except ImportError:
+        st.warning("Word cloud needs the `wordcloud` package — run "
+                   "`pip install wordcloud` and reload.", icon="⚠️")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-grid = (
-    pd.DataFrame({"week": week_num, "weekday": weekday_lbl, "count": daily.values,
-                  "date": daily.index.strftime("%d %b %Y")})
-    .pivot(index="weekday", columns="week", values="count")
-    .reindex(weekday_order)
-)
-hover = (
-    pd.DataFrame({"week": week_num, "weekday": weekday_lbl, "date": daily.index.strftime("%d %b %Y")})
-    .pivot(index="weekday", columns="week", values="date")
-    .reindex(weekday_order)
-)
+# ══════════════════════════════════════════════════════════════════════
+# TAB 4 — AUTHORS & SOURCES
+# ══════════════════════════════════════════════════════════════════════
+with tab_authors:
+    with st.container(border=True, key="authors_filters"):
+        auth_pick = st.multiselect("Filter to specific authors", authors, default=[], key="auth_pick")
 
-vmax = max(int(np.nanmax(grid.values)), 1)
-# Non-linear stops: most days sit at 1-2 articles, so a flat 0→vmax scale
-# leaves them nearly indistinguishable from empty cells. Spread the low end
-# out instead, and let color only approach the darkest navy near the true max.
-stop_points = sorted(set([0, 1, min(2, vmax), max(vmax // 2, 2), vmax]))
-stop_colors = ["#f4f6fb", "#cfe0f5", "#8fb3e0", "#4a76b8", "#0c2f6b"][:len(stop_points)]
-colorscale = [[p / vmax, c] for p, c in zip(stop_points, stop_colors)]
+    fdf = df.copy()
+    if auth_pick:
+        fdf = fdf[fdf["Author"].apply(lambda a: any(x in a for x in auth_pick))]
 
-fig = go.Figure(go.Heatmap(
-    z=grid.values, x=grid.columns, y=grid.index, customdata=hover.values,
-    colorscale=colorscale, zmin=0, zmax=vmax,
-    hovertemplate="%{customdata}<br>%{z} article(s)<extra></extra>",
-    showscale=False, xgap=3, ygap=3,
-))
-fig.update_layout(height=220, margin=dict(l=10, r=10, t=10, b=10),
-                   plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                   xaxis=dict(showticklabels=False, title=None),
-                   yaxis=dict(autorange="reversed"))
-st.plotly_chart(fig, use_container_width=True)
+    if fdf.empty:
+        st.info("No articles match the current filters.")
+        st.stop()
 
-st.divider()
-st.markdown(
-    "👉 Use the pages in the sidebar for a closer look: **✍️ Authors**, **🏷️ Topics**, "
-    "**📈 Trends**, **🌡️ Sentiment**, and the full **📄 Articles** table with search and export."
-)
+    src = source_distribution(fdf)
+    show_sources = src["Source"].nunique() > 1
+
+    if show_sources:
+        c1, c2 = st.columns((3, 2))
+    else:
+        c1 = st.container()
+
+    with c1:
+        st.markdown('<div class="card"><h4>Top 10 authors</h4>', unsafe_allow_html=True)
+        top_authors = explode_authors(fdf)["Author"].value_counts().head(10).reset_index()
+        top_authors.columns = ["Author", "Articles"]
+        fig = px.bar(top_authors.sort_values("Articles"), x="Articles", y="Author", orientation="h",
+                     color_discrete_sequence=[ACCENT])
+        st.plotly_chart(clean_chart(fig, h=380), use_container_width=True, config={"displayModeBar": False})
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    if show_sources:
+        with c2:
+            st.markdown('<div class="card"><h4>Frequency of articles by source</h4>', unsafe_allow_html=True)
+            src["% Share"] = (src["Articles"] / src["Articles"].sum() * 100).round(2)
+            total_row = pd.DataFrame([{"Source": "Total", "Articles": src["Articles"].sum(),
+                                        "% Share": 100.0}])
+            st.dataframe(pd.concat([src, total_row], ignore_index=True), use_container_width=True,
+                         hide_index=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+    st.write("")
+    st.markdown('<div class="card"><h4>Article contributions by author</h4>', unsafe_allow_html=True)
+    contrib = author_contribution_table(fdf, top_n=15)
+    st.dataframe(contrib, use_container_width=True, hide_index=True)
+    st.markdown('</div>', unsafe_allow_html=True)

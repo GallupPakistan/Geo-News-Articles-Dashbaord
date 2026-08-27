@@ -4,6 +4,7 @@ import base64
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -545,6 +546,189 @@ def topic_stats(tdf: pd.DataFrame) -> pd.DataFrame:
     ).reset_index()
     authors_per_topic = exploded.groupby("Topic")["Author"].nunique().reset_index(name="Unique authors")
     return out.merge(authors_per_topic, on="Topic", how="left").sort_values("Articles", ascending=False)
+
+
+# ── Classification engine (rule-based) ──────────────────────────────────
+# Turns free-text Title + Summary into a single "Category" per article,
+# and lets us pull out short "themes" (frequent phrases) within a category.
+# There's no ground-truth label in the source data, so this is a
+# transparent keyword scorer rather than a black-box model: every category
+# is just a list of trigger words/phrases, the article's text is scored
+# against each list (title hits count double), and the highest-scoring
+# category wins. Ties fall back to the order below. Articles that don't
+# hit any keyword land in "Society & Culture".
+
+CATEGORY_KEYWORDS = {
+    "Economy": [
+        "tax", "economy", "economic", "gdp", "inflation", "budget", "financ",
+        "psx", "stock exchange", "credit rating", "moody's", "petrol price",
+        "diesel", "fuel price", "revenue", "imf", "debt", "fiscal", "rupee",
+        "currency", "trade deficit", "exports", "imports", "sovereign",
+        "growth", "unemployment", "subsidy", "pump",
+    ],
+    "Politics": [
+        "pml-n", "ppp", "pti", "election", "politic", "democracy", "party",
+        "assembly", "parliament", "polls", "rigging", "imran khan", "nawaz",
+        "prime minister", "cabinet", "opposition", "vote",
+    ],
+    "Governance": [
+        "governance", "devolution", "province", "institution", "reform",
+        "bureaucracy", "administration", "civil service", "local government",
+        "centre", "system", "competence",
+    ],
+    "Foreign Relations": [
+        "diplomat", "diplomacy", "foreign relation", "ceasefire", "bilateral",
+        "ambassador", "foreign minister", "geopolitic", "soft power",
+        "sco", "united nations", " mou", "summit", "negotiation",
+        "peace deal", "trump", "washington", "beijing", "mediation",
+        "regional peace",
+    ],
+    "Climate & Environment": [
+        "climate", "flood", "monsoon", "river", "water", "hydro",
+        "indus water", " iwt", "drought", "glacier", "environment",
+        "heatwave", "pollution", "irrigation", "rain",
+    ],
+    "Security & Conflict": [
+        "terror", "security", "militant", "strike", "war", "army",
+        "military", "iran", "israel", "gaza", "field marshal", "munir",
+        "crossfire", "conflict",
+    ],
+    "Crime & Justice": [
+        "murder", "cctv", "crime", "abuse", "justice", "court", "police",
+        "legal case", "investigation",
+    ],
+    "Human Rights & Society": [
+        "human rights", " rights", "population", "demographic", "child",
+        "displaced", "registry", "gender", "welfare", "social",
+    ],
+    "Health": [
+        "health", "diet", "disease", "medical", "hospital", "nutrition",
+    ],
+    "Sports": [
+        "fifa", "football", "cricket", "test against", " odi", "series",
+        "tournament", "idol crowned", "psl",
+    ],
+    "Science & Technology": [
+        "artificial intelligence", " ai ", " ai-", "digital", "tech",
+        "fibre", "internet", "machines", "cybersecurity", " data ",
+    ],
+    "Culture & Entertainment": [
+        "shah rukh khan", "entertainment", "film", "music", "culture",
+        "idol", "cinema", "art ",
+    ],
+}
+
+DEFAULT_CATEGORY = "Society & Culture"
+CATEGORY_ORDER = list(CATEGORY_KEYWORDS.keys()) + [DEFAULT_CATEGORY]
+
+
+def _score_text(title: str, body: str) -> str:
+    title_l, body_l = f" {title.lower()} ", f" {body.lower()} "
+    best_cat, best_score = DEFAULT_CATEGORY, 0
+    for cat, kws in CATEGORY_KEYWORDS.items():
+        score = 0
+        for kw in kws:
+            score += 2 * title_l.count(kw.lower()) + body_l.count(kw.lower())
+        if score > best_score:
+            best_cat, best_score = cat, score
+    return best_cat
+
+
+@st.cache_data
+def classify_articles(fdf: pd.DataFrame, summary_col: str = "Summary (100 Words)") -> pd.DataFrame:
+    """Adds a 'Category' column (rule-based, see CATEGORY_KEYWORDS above)."""
+    out = fdf.copy()
+    out["Category"] = [
+        _score_text(str(t), str(s))
+        for t, s in zip(out["Title"].fillna(""), out[summary_col].fillna(""))
+    ]
+    return out
+
+
+def category_distribution(cdf: pd.DataFrame) -> pd.DataFrame:
+    counts = cdf["Category"].value_counts().reset_index()
+    counts.columns = ["Category", "Articles"]
+    counts["Share (%)"] = (counts["Articles"] / counts["Articles"].sum() * 100).round(1)
+    return counts
+
+
+def category_month_trend(cdf: pd.DataFrame, top_n: int = 6) -> pd.DataFrame:
+    """Monthly share (%) of articles for the top-N categories — the data
+    behind the multi-line 'Classification Trend' chart."""
+    if cdf.empty:
+        return pd.DataFrame(columns=["Month", "Category", "Share (%)"])
+    top_cats = cdf["Category"].value_counts().head(top_n).index.tolist()
+    monthly_total = cdf.groupby("Month").size()
+    sub = cdf[cdf["Category"].isin(top_cats)]
+    pivot = sub.groupby(["Month", "Category"]).size().reset_index(name="Articles")
+    pivot["Share (%)"] = pivot.apply(
+        lambda r: round(100 * r["Articles"] / monthly_total.get(r["Month"], 1), 1), axis=1
+    )
+    months = sorted(cdf["Month"].dropna().unique())
+    full = pd.MultiIndex.from_product([months, top_cats], names=["Month", "Category"]).to_frame(index=False)
+    out = full.merge(pivot, on=["Month", "Category"], how="left").fillna({"Articles": 0, "Share (%)": 0})
+    return out.sort_values(["Category", "Month"])
+
+
+def category_author_diversity(cdf: pd.DataFrame) -> pd.DataFrame:
+    """Per category: how many distinct authors have written in it, and how
+    many articles — a 'is this category one voice or many?' view."""
+    exploded = explode_authors(cdf)
+    out = exploded.groupby("Category").agg(
+        Articles=("Title", "count"),
+        **{"Unique authors": ("Author", "nunique")},
+    ).reset_index()
+    out["Articles per author"] = (out["Articles"] / out["Unique authors"]).round(1)
+    return out.sort_values("Articles", ascending=False)
+
+
+THEME_STOP = CUSTOM_STOP | {"pakistan's", "it's", "don't", "isn't"}
+
+
+def category_themes(cdf: pd.DataFrame, category: str, top_n: int = 8) -> pd.DataFrame:
+    """Top recurring 2-word phrases within one category's articles — the
+    'Themes Covered in <Category>' bars. Falls back to single words when
+    there isn't enough text to support repeated bigrams."""
+    from sklearn.feature_extraction.text import CountVectorizer, ENGLISH_STOP_WORDS
+
+    sub = cdf[cdf["Category"] == category]
+    corpus = (sub["Title"].fillna("") + " " + sub["Summary (100 Words)"].fillna("")).tolist()
+    corpus = [c for c in corpus if c.strip()]
+    if not corpus:
+        return pd.DataFrame(columns=["Theme", "Share (%)"])
+
+    stop = list(ENGLISH_STOP_WORDS.union(THEME_STOP))
+    for ngram in [(2, 2), (1, 1)]:
+        vec = CountVectorizer(ngram_range=ngram, stop_words=stop, min_df=1, max_features=300)
+        try:
+            X = vec.fit_transform(corpus)
+        except ValueError:
+            continue
+        sums = np.asarray(X.sum(axis=0)).ravel()
+        terms = vec.get_feature_names_out()
+        pairs = sorted(zip(terms, sums), key=lambda p: -p[1])
+        pairs = [(t, c) for t, c in pairs if c > (1 if ngram == (1, 1) else 0)][:top_n]
+        if pairs:
+            total = max(sum(c for _, c in pairs), 1)
+            out = pd.DataFrame(pairs, columns=["Theme", "Count"])
+            out["Theme"] = out["Theme"].str.title()
+            out["Share (%)"] = (out["Count"] / total * 100).round(0)
+            return out[["Theme", "Share (%)"]]
+    return pd.DataFrame(columns=["Theme", "Share (%)"])
+
+
+def author_contribution_table(cdf: pd.DataFrame, top_n: int = 10) -> pd.DataFrame:
+    """Per top-N author: their single most-written category + article count
+    — powers the 'Article Contributions by Author' table."""
+    exploded = explode_authors(cdf)
+    top_authors = exploded["Author"].value_counts().head(top_n).index.tolist()
+    rows = []
+    for a in top_authors:
+        sub = exploded[exploded["Author"] == a]
+        top_cat = sub["Category"].value_counts().idxmax() if "Category" in sub else "—"
+        rows.append({"Author": a, "Top category": top_cat, "Articles": len(sub)})
+    out = pd.DataFrame(rows).sort_values("Articles", ascending=False)
+    return out
 
 
 # ── Sentiment (VADER — same tool used in the ARIA project) ─────────────────

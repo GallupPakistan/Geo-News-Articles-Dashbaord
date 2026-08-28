@@ -13,5 +13,5 @@ jobs:
         continue-on-error: true
         run: |
           echo "Pinging geonews..."
-          curl -s -L --max-redirs 20 -o /dev/null "https://geo-news-articles-dashbaord.streamlit.app/" || true
+          curl -s -L --max-redirs 20 -o /dev/null "https://geo-news-articles-dashbaord-kzomtir9xnvuwzk7dhib4f.streamlit.app/" || true
           echo "Ping attempt finished (redirect behavior is normal for Streamlit apps)."

@@ -20,7 +20,7 @@ if sys.version_info < (3, 9):
     )
 
 ROOT = Path(__file__).parent
-DATA_PATH = ROOT / "Final_Geo_News_.xlsx"
+DATA_PATH = ROOT / "Final_Geo_News_Updated.xlsx"
 LOGO_PATH = ROOT / "assets" / "geo_logo.png"
 BANNER_PATH = ROOT / "assets" / "opinions_banner.png"
 
